@@ -1,0 +1,64 @@
+// src/services/SavingsService.ts
+import {
+    CurrencyCode,
+    SavingsResult,
+    loadCurrencyRatesFromInternet,
+    getCurrencyRates,
+} from '../savings/savings';
+import SavingsExecutor from '../native/SavingsExecutor';
+
+export type SavingsRequest = {
+    monthlyIncome: number;
+    p: number;
+    currency: CurrencyCode;
+};
+
+export type SavingsEvent =
+    | { type: 'STARTED'; request: SavingsRequest }
+    | { type: 'SUCCESS'; request: SavingsRequest; result: SavingsResult }
+    | { type: 'ERROR'; request: SavingsRequest; error: string };
+
+type Listener = (event: SavingsEvent) => void;
+
+const listeners = new Set<Listener>();
+
+export function subscribeSavingsService(listener: Listener) {
+    listeners.add(listener);
+    return () => {
+        listeners.delete(listener);
+    };
+}
+
+function emit(event: SavingsEvent) {
+    listeners.forEach(l => l(event));
+}
+
+// Аналог IntentService + ExecutorService, але з RN-native модулем
+export async function runSavingsCalculation(request: SavingsRequest) {
+    try {
+        emit({type: 'STARTED', request});
+
+        // 1) Курси: НБУ або текстовий файл (усередині savings.ts)
+        const {rates} = await loadCurrencyRatesFromInternet();
+        const effectiveRates = rates ?? getCurrencyRates();
+        const {start: cStart, end: cEnd} = effectiveRates[request.currency];
+
+        // 2) Розрахунок: йде в Kotlin через ExecutorService
+        const result = await SavingsExecutor.calculateSavings(
+            request.monthlyIncome,
+            request.p,
+            request.currency,
+            cStart,
+            cEnd,
+        );
+
+        emit({type: 'SUCCESS', request, result});
+    } catch (e: any) {
+        console.warn('[SavingsService] calc error', e);
+        emit({
+            type: 'ERROR',
+            request,
+            error: e?.message ?? 'Unknown error',
+        });
+    }
+}
